@@ -132,6 +132,7 @@ global LetzteAenderung := 0, LetzterWert := -1
 global Verlauf := []              ; [Zeitstempel, Wert] fuer die gemessene Rate
 global Fertig := false
 global LetzteGuteLesung := 0      ; wann der Balken zuletzt lesbar war
+global WegProtokolliert := false  ; "kein Abschluss" fuer diesen Aussetzer schon ins Log geschrieben?
 global Essen := -1, Trinken := -1
 global VorratZeit := 0            ; wann Essen/Trinken zuletzt gelesen wurden
 global VorratKandidatE := -1, VorratKandidatT := -1
@@ -145,6 +146,8 @@ global TABAK_ENDE := 0          ; Tickzeit, zu der die Bearbeitung fertig ist (0
 global Schritte := []        ; die Kette nach dem Fertigwerden
 global SchrittNr := 0
 global SchrittTest := false
+global SchrittFaellig := 0   ; Tickzeit, zu der der naechste Schritt dran sein sollte
+global SCHRITT_VERSPAETUNG := 5000   ; kommt ein Schritt spaeter, ist die Lage im Spiel nicht mehr sicher
 
 OnError(HandleError)
 DunkelAnmelden()
@@ -235,8 +238,8 @@ Ui.SetFont("s10 Bold c" . FARB_GUT)
 global TxtKastenLauf := Ui.Add("Text", "x+10 yp+5 w76 Background" . FARB_FELD, "")
 Ui.SetFont("s10 Norm c" . FARB_TEXT)
 
-; Dieselbe Wunschsumme wie im Reiter "Tabak", damit man beim Sammeln sieht,
-; wie weit es noch ist.
+; Die Wunschsumme: wie viel Blaetter fuer diesen Betrag noetig sind, damit
+; man beim Sammeln sieht, wie weit es noch ist.
 global TabakStrich := Ui.Add("Text", "xm+14 y+12 w352 h1 Background" . FARB_LINIE)
 Ui.SetFont("s9 c" . FARB_GRAU)
 Ui.Add("Text", "xm+14 y+10 w62 BackgroundTrans", "Wunsch $")
@@ -799,9 +802,10 @@ TabakKastenUmschalten(an) {
         TabakZeigen()
 }
 
-; Alles, was zum Kasten gehoert - die Flaeche, die Beschriftungen und die
-; Eingabefelder. Die Beschriftungen liegen ohne eigene Variable herum,
-; deshalb kommen sie ueber ihre Lage im Fenster dazu.
+; Alles, was zum Kasten gehoert - die Flaeche, die Anzeigen und die
+; Eingabefelder. Die drei kleinen Beschriftungen ("Blätter", "$/Tabak",
+; "Wunsch $") haben keine eigene Variable und stehen nicht in der Liste:
+; sie verschwinden, weil das Fenster beim Zuklappen um den Kasten kuerzer wird.
 KastenFelder() {
     return [TabakKasten, TxtKastenGeld, TxtKastenMenge
         , EdKastenBlatt, EdKastenPreis
@@ -818,11 +822,11 @@ TabakHakenGeklickt() {
 
 ; ---- Eingaben ---------------------------------------------------------
 ;
-; Dieselben Werte stehen zweimal da: im Kasten und im Reiter "Tabak". Beide
-; schreiben in dieselben Variablen und die jeweils andere Seite hinterher
-; nach. Jedes Setzen eines Feldes meldet Windows selbst wieder als
-; Aenderung - deshalb prueft TabakEingabe zuerst, ob ueberhaupt etwas
-; Neues drinsteht.
+; Blaetter und Preis werden im Kasten eingetragen, das Rezept (Blaetter je
+; Tabak, Minuten je Tabak) im Zahnrad unter "Werte". TabakZeigen schreibt
+; nach jeder Rechnung alle diese Felder neu. Jedes Setzen eines Feldes
+; meldet Windows selbst wieder als Aenderung - deshalb prueft TabakEingabe
+; zuerst, ob ueberhaupt etwas Neues drinsteht.
 
 KastenFeldGeaendert() {
     TabakEingabe(EdKastenBlatt.Value, EdKastenPreis.Value)
@@ -899,8 +903,9 @@ FeldSetzen(feld, wert) {
         feld.Value := wert
 }
 
-; Die Wunschsumme steht zweimal da - im Kasten und im Reiter. Wie bei den
-; uebrigen Feldern zaehlt nur, was sich wirklich geaendert hat.
+; Die Wunschsumme aus dem Kasten. Wie bei den uebrigen Feldern zaehlt nur,
+; was sich wirklich geaendert hat - WunschRechnen schreibt das Feld selbst
+; wieder zurueck.
 WunschEingabe(wert) {
     global WUNSCH
 
@@ -944,8 +949,8 @@ WunschRechnen() {
         , Tausender(fehlt), Dauer(fehlt / SOLL_RATE), Dauer(bearbeitung)))
 }
 
-; Rezept und Wunschsumme sofort merken. Der Reiter mit dem Uebernehmen-Knopf
-; ist weg, also darf das Speichern nicht mehr daran haengen.
+; Rezept und Wunschsumme sofort merken. Kasten-Eingaben haben keinen
+; Uebernehmen-Knopf, also darf das Speichern nicht daran haengen.
 TabakSpeichern() {
     try {
         IniWrite(WUNSCH, INI, "Tabak", "Wunsch")
@@ -1650,8 +1655,9 @@ Auswerten(txt) {
         }
     }
 
-    global LetzteGuteLesung
+    global LetzteGuteLesung, WegProtokolliert
     LetzteGuteLesung := A_TickCount
+    WegProtokolliert := false       ; ein neuer Aussetzer darf wieder einmal ins Log
     Aktuell := a, Gesamt := g, Prozent := (p >= 0 ? p : a / g * 100)
     Fortschreiben()
     Anzeigen()
@@ -1814,7 +1820,7 @@ Farbe(feld, hex) {
 ; Kein Balken im Bild. Am Ende eines Auftrags blendet das HUD ihn aus, deshalb
 ; kommt die letzte Zahl oft nie an - dann entscheidet der zuletzt gelesene Stand.
 OhneAnzeige() {
-    global Fertig
+    global Fertig, WegProtokolliert
 
     if (Aktuell < 0) {
         Note("Zahlen nicht erkannt - im Zahnrad den Zähler neu aufziehen.")
@@ -1848,8 +1854,13 @@ OhneAnzeige() {
             , Round(fehlt / 1000), Aktuell, Gesamt, rest))
         Melde(Format("FERTIG (Balken weg bei {1}/{2}, Rest {3}){4}", Aktuell, Gesamt, rest, Zielzusatz()))
     } else {
-        Protokoll(Format("Balken seit {1} s weg, letzter Stand {2}/{3} (Rest {4}) - kein Abschluss."
-            , Round(fehlt / 1000), Aktuell, Gesamt, rest))
+        ; Nur einmal je Aussetzer ins Log: diese Stelle laeuft bei jedem Takt,
+        ; frueher stand dieselbe Zeile mehrmals pro Sekunde in der Mitschrift.
+        if (!WegProtokolliert) {
+            WegProtokolliert := true
+            Protokoll(Format("Balken seit {1} s weg, letzter Stand {2}/{3} (Rest {4}) - kein Abschluss."
+                , Round(fehlt / 1000), Aktuell, Gesamt, rest))
+        }
         TxtProzent.Value := Format("Balken weg bei {1}/{2} - abgebrochen?", Aktuell, Gesamt)
         Note("Kein Balken mehr - Sammeln abgebrochen oder Bereich verdeckt.")
     }
@@ -1919,7 +1930,58 @@ AblaufStarten(test) {
         Protokoll("Fenster nicht geholt (Haken aus) - vorn ist: " . VornTitel())
 
     SchrittTest := test, SchrittNr := 0
-    SetTimer(AblaufWeiter, -Max(Schritte[1].ms, 1))
+    SchrittPlanen(Schritte[1].ms)
+}
+
+; Naechsten Schritt stellen und merken, wann er dran sein sollte.
+SchrittPlanen(ms) {
+    global SchrittFaellig
+    ms := Max(ms, 1)
+    SchrittFaellig := A_TickCount + ms
+    SetTimer(AblaufWeiter, -ms)
+}
+
+; Kette anhalten - der Rest wuerde sonst in irgendein Fenster tippen.
+AblaufAbbrechen(grund) {
+    global Schritte
+    Protokoll(Format("Abbruch bei Schritt {1}/{2}: {3}", SchrittNr, Schritte.Length, grund))
+    Note("Ablauf abgebrochen: " . grund)
+    SetTimer(AblaufWeiter, 0)
+    Schritte := []
+}
+
+; Steht das Spiel noch vorn? Zwischen zwei Schritten kann sich viel tun -
+; ein Klick daneben, das Startmenue, die Windows-Suche. Einmal geht es
+; nochmal nach vorn zu holen; klappt das nicht, ist Schluss.
+SpielNochVorn() {
+    h := Spielfenster()
+    if (!h)
+        return !EigenesFenster(WinExist("A"))   ; ohne gemerktes Fenster: nur nicht in den Sammler
+    if (SpielIstVorn(h))
+        return true
+    if (!TASTE_AKT)
+        return !EigenesFenster(WinExist("A"))   ; holen abgeschaltet: wie bisher, nur nicht in den Sammler
+    loop 2 {
+        try {
+            WinActivate("ahk_id " . h)
+            WinWaitActive("ahk_id " . h, , 0.5)
+        }
+        if (SpielIstVorn(h)) {
+            Protokoll("Spielfenster war weg und ist wieder vorn.")
+            return true
+        }
+        Sleep(100)
+    }
+    return false
+}
+
+; Ist das Spiel vorn? Vollbild meldet sich nicht immer sauber als aktiv -
+; deshalb reicht auch ein vorderes Fenster derselben Programmdatei.
+SpielIstVorn(h) {
+    if (WinActive("ahk_id " . h))
+        return true
+    try return (WinGetProcessName("A") = WinGetProcessName("ahk_id " . h))
+    return false
 }
 
 AblaufWeiter() {
@@ -1934,13 +1996,23 @@ AblaufSchritt() {
         return
     sch := Schritte[SchrittNr]
 
+    ; Kommt ein Schritt viel zu spaet (Skript haengte, Rechner beschaeftigt),
+    ; passt der Zustand im Spiel nicht mehr zur Kette - frueher kam Schritt 2
+    ; einmal 83 s nach Schritt 1 und landete in der Windows-Suche.
+    spaet := A_TickCount - SchrittFaellig
+    if (spaet > SCHRITT_VERSPAETUNG)
+        return AblaufAbbrechen(Format("{1} kam {2} s zu spät", sch.name, Round(spaet / 1000)))
+
+    if (!SpielNochVorn())
+        return AblaufAbbrechen(sch.name . " - Spielfenster nicht vorn, vorn ist: " . VornTitel())
+
     if (sch.art = "klick")
         WurfJetzt(sch.name)
     else
         TasteJetzt(sch.taste, sch.name)
 
     if (SchrittNr < Schritte.Length)
-        SetTimer(AblaufWeiter, -Max(Schritte[SchrittNr + 1].ms, 1))
+        SchrittPlanen(Schritte[SchrittNr + 1].ms)
 }
 
 ; Von Hand ausgeloest: dieselbe Kette, nur mit Hinweis in der Statuszeile.
