@@ -23,7 +23,7 @@ Dazu gibt es einen Tabak-Rechner (Blätter → Tabak → Geld, Rückwärtsrechnu
 |---|---|
 | `Sammler.ahk` | Das ganze Skript in einer Datei (inkl. PowerShell-OCR-Code in `PS_Quelltext()`). |
 | `Sammler.ini` | Gemerkte Einstellungen (Lesefelder, Zeiten, Tasten, Tabak-Werte). |
-| `Sammler.log` | Mitschrift des Ablaufs nach dem Sammeln (wird vom Skript geschrieben). |
+| `Sammler.log` | Mitschrift des Ablaufs nach dem Sammeln (wird vom Skript geschrieben; ab 300 KB nach `Sammler.alt.log` verschoben). |
 
 ### Kodierung – nicht verändern!
 
@@ -50,8 +50,12 @@ Dazu gibt es einen Tabak-Rechner (Blätter → Tabak → Geld, Rückwärtsrechnu
 - **OCR:** `StartOcr` schreibt `PS_Quelltext()` nach `%TEMP%\sammler_ocr.ps1` und
   startet einen PowerShell-Dienst; Kommunikation über `sammler_cmd.txt` /
   `sammler_ocr.txt` im Temp-Ordner (`Auftrag`, `WarteAufAntwort`, `FeldLesen`).
+  Erst nach `READY` (`OcrBereit`) werden Aufträge angenommen; stirbt der Dienst,
+  startet `OcrNeuStarten` ihn neu (höchstens alle 15 s).
 - **Lesen/Auswerten:** `TimerTick`, `VorratTick`, `Lesen`, `Auswerten`,
   `VorratLesen`, `Fortschreiben`, `IstRate`, `Anzeigen`, `Dauer`.
+  `Bestaetigt` lässt neue Gesamtwerte und Rücksprünge erst nach einer zweiten,
+  passenden Lesung durch (gegen Verleser wie „40 / 40“).
 - **Ablauf nach Fertig:** `Melde` → `AblaufStarten` → `AblaufSchritt`
   (`TasteJetzt`, `WurfJetzt`, `FensterNachVorn`); Einträge ins Log über `Protokoll`.
 - **Fehler:** `Guard(fn)` und `HandleError` fangen ab und melden über `Note`.

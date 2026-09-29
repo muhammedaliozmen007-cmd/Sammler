@@ -30,6 +30,7 @@ global OCR_PS  := A_Temp . "\sammler_ocr.ps1"
 global OCR_OUT := A_Temp . "\sammler_ocr.txt"
 global OCR_CMD := A_Temp . "\sammler_cmd.txt"
 global LOGDATEI     := SCRIPT_DIR . "\Sammler.log"   ; Mitschrift des Ablaufs nach dem Sammeln
+global LOGALT       := SCRIPT_DIR . "\Sammler.alt.log"   ; die vorige Mitschrift, wenn die aktuelle voll war
 
 global TAKT := 10.0      ; Sekunden pro Sammel-Zyklus
 global PRO_TAKT := 2     ; Stueck pro Zyklus  ->  0,2 Stueck/s
@@ -126,7 +127,11 @@ global Vorrat  := Lesefeld("Vorrat", "Essen/Trinken")
 global OcrPid := 0
 global AuftragNr := 0        ; jede Lesung bekommt eine Nummer
 global Busy := false
-global Aktuell := -1, Gesamt := -1, Prozent := -1.0
+global Aktuell := -1, Gesamt := -1
+global KandidatA := -1, KandidatG := -1   ; verdaechtige Lesung, die noch eine Bestaetigung braucht
+global OcrBereit := false         ; hat der Dienst READY gemeldet?
+global OcrNeustartZeit := 0       ; wann zuletzt neu gestartet wurde (Bremse)
+global KnappGemeldet := false     ; "knapp" schon in der Statuszeile gemeldet?
 global StartZeit := 0, StartWert := -1
 global LetzteAenderung := 0, LetzterWert := -1
 global Verlauf := []              ; [Zeitstempel, Wert] fuer die gemessene Rate
@@ -164,8 +169,6 @@ Ui.MarginX := 16, Ui.MarginY := 14
 
 Ui.SetFont("s16 Bold")
 global TxtStand := Ui.Add("Text", "w330", "-  /  -")
-Ui.SetFont("s10 Norm")
-global TxtProzent := Ui.Add("Text", "xm w330 c" . FARB_GRAU, "noch nicht gelesen")
 
 Ui.SetFont("s14 Bold")
 global TxtFertig := Ui.Add("Text", "xm y+10 w380 Center c" . FARB_GUT . " Hidden", "Fertig gesammelt")
@@ -445,13 +448,15 @@ Note(txt) {
     try TxtHint.Value := txt
 }
 
-; Schreibt eine Zeile in die Mitschrift. Nur der Ablauf nach dem Sammeln
-; landet hier - damit sich hinterher nachlesen laesst, warum eine Taste
-; ausgeblieben ist. Wird die Datei zu gross, faengt sie von vorne an.
+; Schreibt eine Zeile in die Mitschrift. Hier landen der Ablauf nach dem
+; Sammeln und Neustarts der Texterkennung - damit sich hinterher nachlesen
+; laesst, warum eine Taste ausgeblieben ist. Wird die Datei zu gross, wandert
+; sie nach Sammler.alt.log (die vorige alte faellt weg) und es geht neu los -
+; so ist der letzte Verlauf nicht auf einen Schlag verloren.
 Protokoll(txt) {
     try {
         if (FileExist(LOGDATEI) && FileGetSize(LOGDATEI) > 300000)
-            FileDelete(LOGDATEI)
+            FileMove(LOGDATEI, LOGALT, true)
         FileAppend(FormatTime(, "dd.MM. HH:mm:ss") . "  " . txt . "`n", LOGDATEI, "UTF-8")
     }
 }
@@ -1470,7 +1475,11 @@ Verdeckt(f) {
 ; ---------------------------------------------------------------- Texterkennung
 
 StartOcr() {
-    global OcrPid
+    global OcrPid, OcrBereit
+
+    ; Bis READY kommt, nimmt FeldLesen keine Auftraege an: sonst loescht eine
+    ; Lesung die READY-Antwort, bevor WarteAufDienst sie sieht.
+    OcrBereit := false
 
     ; Den PowerShell-Teil bei jedem Start frisch hinlegen, damit er zur
     ; Fassung dieser Datei passt.
@@ -1489,11 +1498,26 @@ StartOcr() {
 }
 
 WarteAufDienst() {
+    global OcrBereit
     if (WarteAufAntwort(0, 20000) = "READY") {
+        OcrBereit := true
         Note("Bereit. F1 = einmal lesen, F2 = Dauerlesung.")
         return
     }
     Note("Texterkennung antwortet nicht - Windows-OCR-Sprache installiert?")
+}
+
+; Der Dienst ist weg (abgestuerzt, Standby, von Hand beendet): neu starten.
+; Hoechstens alle 15 s, damit ein Dienst, der sofort wieder stirbt, nicht
+; in einer Schleife PowerShell nach PowerShell startet.
+OcrNeuStarten() {
+    global OcrNeustartZeit
+    if (OcrNeustartZeit && A_TickCount - OcrNeustartZeit < 15000)
+        return
+    OcrNeustartZeit := A_TickCount
+    Protokoll("Texterkennung war beendet - wird neu gestartet.")
+    Note("Texterkennung war beendet - starte neu ...")
+    StartOcr()
 }
 
 ; Wartet, bis der Dienst die Ergebnisdatei geschrieben hat.
@@ -1550,9 +1574,11 @@ FeldLesen(f, modus := 0, sc := 3, rd := 0) {
     if (!f.Kalibriert)
         return ""
     if (!OcrPid || !ProcessExist(OcrPid)) {
-        Note("Texterkennung läuft nicht.")
-        return ""
+        OcrNeuStarten()
+        return "BUSY"                ; gleich wieder da - bis dahin still aussetzen
     }
+    if (!OcrBereit)
+        return "BUSY"                ; Dienst startet noch
 
     LeseRechteck(f, &x, &y, &w, &h)
     global AuftragNr
@@ -1627,7 +1653,7 @@ Normal(txt) {
 
 ; Holt "24 / 168" und die Prozentzahl aus dem erkannten Text.
 Auswerten(txt) {
-    global Aktuell, Gesamt, Prozent
+    global Aktuell, Gesamt
 
     norm := Normal(txt)
 
@@ -1655,13 +1681,41 @@ Auswerten(txt) {
         }
     }
 
+    ; Ein anderer Gesamtwert oder ein Ruecksprung heisst entweder "neuer
+    ; Auftrag" oder "verlesen". Beides sieht in einer einzelnen Lesung gleich
+    ; aus - im Log standen Abschluesse wie "40 / 40" nach einem vollen
+    ; 168er-Auftrag, und "40 / 40" passt sogar zu "100 %". Deshalb gilt so
+    ; eine Lesung erst, wenn die naechste sie bestaetigt: gleicher Gesamtwert,
+    ; Stand hoechstens ein paar Stueck weiter.
+    if (!Bestaetigt(a, g))
+        return
+
     global LetzteGuteLesung, WegProtokolliert
     LetzteGuteLesung := A_TickCount
     WegProtokolliert := false       ; ein neuer Aussetzer darf wieder einmal ins Log
-    Aktuell := a, Gesamt := g, Prozent := (p >= 0 ? p : a / g * 100)
+    Aktuell := a, Gesamt := g
     Fortschreiben()
     Anzeigen()
     Note("Gelesen um " . FormatTime(, "HH:mm:ss"))
+}
+
+; true = die Lesung darf uebernommen werden. Unauffaellige Lesungen (gleicher
+; Gesamtwert, Stand nicht kleiner) gehen sofort durch, alles andere erst,
+; wenn es zweimal hintereinander so gelesen wurde.
+Bestaetigt(a, g) {
+    global KandidatA, KandidatG
+
+    if (Gesamt <= 0 || (g = Gesamt && a >= Aktuell)) {
+        KandidatA := -1, KandidatG := -1
+        return true
+    }
+    if (g = KandidatG && a >= KandidatA && a - KandidatA <= 5) {
+        KandidatA := -1, KandidatG := -1
+        return true
+    }
+    KandidatA := a, KandidatG := g
+    Note(Format("Unsicher gelesen: {1}/{2} (bisher {3}/{4}) - warte auf Bestätigung", a, g, Aktuell, Gesamt))
+    return false
 }
 
 ; ---------------------------------------------------------------- Essen und Trinken
@@ -1803,8 +1857,17 @@ ZeigeVorrat() {
         Farbe(TxtVorrat, FARB_GRAU)
     else
         Farbe(TxtVorrat, zuWenig ? FARB_WARN : FARB_GUT)
-    if (zuWenig && alter <= 25)
+
+    ; Nur einmal beim Unterschreiten melden: die rote Zeile zeigt es ohnehin,
+    ; und alle 8 s neu geschrieben verdraengte die Meldung alles andere aus
+    ; der Statuszeile (etwa "Ablauf abgebrochen").
+    global KnappGemeldet
+    if (!zuWenig)
+        KnappGemeldet := false
+    else if (alter <= 25 && !KnappGemeldet) {
+        KnappGemeldet := true
         Note("Essen oder Trinken unter " . KNAPP . " Prozent.")
+    }
 }
 
 ; Textfarbe umstellen. Ohne Redraw bleibt die alte Farbe stehen.
@@ -1861,8 +1924,7 @@ OhneAnzeige() {
             Protokoll(Format("Balken seit {1} s weg, letzter Stand {2}/{3} (Rest {4}) - kein Abschluss."
                 , Round(fehlt / 1000), Aktuell, Gesamt, rest))
         }
-        TxtProzent.Value := Format("Balken weg bei {1}/{2} - abgebrochen?", Aktuell, Gesamt)
-        Note("Kein Balken mehr - Sammeln abgebrochen oder Bereich verdeckt.")
+        Note(Format("Kein Balken mehr bei {1}/{2} - Sammeln abgebrochen oder Bereich verdeckt.", Aktuell, Gesamt))
     }
 }
 
@@ -1870,8 +1932,8 @@ OhneAnzeige() {
 Melde(txt) {
     global Fertig
     Fertig := true
+    TxtFertig.Value := Vorzeitig() ? Format("Ziel {1} erreicht", Fertigwert()) : "Fertig gesammelt"
     TxtFertig.Visible := true
-    TxtProzent.Value := txt
     Note(txt . "   um " . FormatTime(, "HH:mm:ss"))
     Protokoll(Format("--- {1}  (Stand {2}/{3}, Ziel {4}, {5})"
         , txt, Aktuell, Gesamt, Fertigwert(), Vorzeitig() ? "vorzeitig" : "Auftrag durch"))
@@ -2352,7 +2414,6 @@ Anzeigen() {
     rest := ziel - Aktuell
 
     TxtStand.Value := Format("{1}  /  {2}", Aktuell, Gesamt)
-    TxtProzent.Value := Format("{1:0.2f} Prozent gesammelt", Prozent)
     TxtRest.Value := "Rest: " . rest . " Stück" . (ziel < Gesamt ? Format("  (bis {1})", ziel) : "")
 
     ZeigeSollzeile(rest)
@@ -2373,9 +2434,7 @@ Anzeigen() {
     TabakKastenRechnen()
 
     still := (A_TickCount - LetzteAenderung) / 1000
-    if (Aktuell >= ziel)
-        TxtProzent.Value := (ziel < Gesamt) ? Format("FERTIG - Ziel {1} erreicht", ziel) : "FERTIG - alles gesammelt"
-    else if (still > STILL_S)
+    if (Aktuell < ziel && still > STILL_S)
         Note(Format("Kein Fortschritt seit {1} s - Sammeln unterbrochen?", Round(still)))
 }
 
