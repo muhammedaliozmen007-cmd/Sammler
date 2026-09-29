@@ -1,0 +1,4 @@
+# Dateien byte-genau lassen: AHK mit CRLF, INI in UTF-16 LE
+*.ahk -text
+*.ini -text
+*.log -text
