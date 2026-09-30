@@ -23,7 +23,7 @@ Dazu gibt es einen Tabak-Rechner (Blätter → Tabak → Geld, Rückwärtsrechnu
 |---|---|
 | `Sammler.ahk` | Das ganze Skript in einer Datei (inkl. PowerShell-OCR-Code in `PS_Quelltext()`). |
 | `Sammler.ini` | Gemerkte Einstellungen (Lesefelder, Zeiten, Tasten, Tabak-Werte). |
-| `Sammler.log` | Mitschrift des Ablaufs nach dem Sammeln (wird vom Skript geschrieben; ab 300 KB nach `Sammler.alt.log` verschoben). |
+| `Sammler.log` | Mitschrift des Ablaufs nach dem Sammeln (wird vom Skript geschrieben; ab 300 KB nach `Sammler.alt.log` verschoben). **Nicht im Repo** (`.gitignore`) – der Nutzer lädt sie bei Bedarf hoch. |
 
 ### Kodierung – nicht verändern!
 
@@ -72,5 +72,5 @@ Dazu gibt es einen Tabak-Rechner (Blätter → Tabak → Geld, Rückwärtsrechnu
 ## Testen
 
 Das Skript läuft nur unter Windows mit AutoHotkey v2 (hier in der Linux-Umgebung
-nicht ausführbar). Änderungen sorgfältig lesen und auf Syntax prüfen; das Log
-(`Sammler.log`) hilft beim Nachvollziehen von Fehlern im Ablauf.
+nicht ausführbar). Änderungen sorgfältig lesen und auf Syntax prüfen. Bei Fehlern im
+Ablauf den Nutzer bitten, seine `Sammler.log` hochzuladen – sie liegt nicht im Repo.
